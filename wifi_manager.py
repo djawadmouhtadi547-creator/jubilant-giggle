@@ -53,12 +53,18 @@ class Router:
             return f.read().decode("utf-8", "ignore")
 
     def login(s):
+        s.ck.pop("sessionid", None)
+        h = s.get("/cgi-bin/webproc")
+        m = re.search(r"Cookie\.Set\('sessionid',\s*'(\w+)'", h)
+        sid = m.group(1) if m else "0"
+        s.ck["sessionid"] = sid
         body = urllib.parse.urlencode({"getpage": "html/index.html", "errorpage": "html/main.html",
-                                       "var:language": "en_us", "var:page": "*",
-                                       "login:command/username": s.c["user"],
-                                       "login:command/password": s.c["pass"]}, safe=":/*").encode()
+                                       "var:menu": "setup", "var:page": "wizard", "obj-action": "auth",
+                                       ":username": s.c["user"], ":password": s.c["pass"],
+                                       ":action": "login", ":sessionid": sid}, safe=":/*").encode()
         s.get("/cgi-bin/webproc", data=body)
-        return "sessionid" in s.ck
+        s.ck["sessionid"] = sid
+        return "INPUT_Psd" not in s.page("advanced", "parent_control")
 
     def page(s, menu, page, sub=""):
         p = {"getpage": "html/index.html", "var:menu": menu, "var:page": page}
@@ -102,13 +108,18 @@ class Router:
         return mac not in s.get(s.c["p_tod"]).lower()
 
     def diag(s):
-        out = ["login ok: %s  cookies: %s" % (s.login(), list(s.ck))]
+        ok = s.login()
+        out = ["login ok: %s" % ok]
+        if not ok:
+            return "فشل تسجيل الدخول: تأكد من اسم المستخدم وكلمة السر في الإعدادات"
         bad = re.compile(r"logout|reboot|reset|restore|upgrade|factory|obj-action|delete|remove", re.I)
-        todo = ["/cgi-bin/webproc?getpage=html/index.html&var:menu=%s&var:page=%s" % (m, p) for m, p in
-                (("status", ""), ("advanced", "parent_control"), ("advanced", "block_macaddress"),
-                 ("setup", ""), ("management", ""))]
-        todo += ["/cgi-bin/webproc?getpage=html/index.html&var:menu=advanced&var:page=parent_control&var:subpage=block_macaddress"]
-        seen = set()
+        base = "/cgi-bin/webproc?getpage=html/index.html&var:menu=%s&var:page=%s"
+        todo = [base % (m, p) for m, p in (
+            ("advanced", "parent_control"), ("advanced", "block_macaddress"), ("setup", "wizard"),
+            ("status", "device_info"), ("status", "deviceinfo"), ("status", "wireless_clients"),
+            ("status", "wlan_clients"), ("status", "dhcp_clients"), ("status", "dhcp"), ("status", "statistics"))]
+        todo.append(base % ("advanced", "parent_control") + "&var:subpage=block_macaddress")
+        seen, js = set(), 0
         while todo and len(seen) < 45:
             u = todo.pop(0)
             if u in seen: continue
@@ -116,12 +127,16 @@ class Router:
             try: h = s.get(u)
             except Exception as e:
                 out.append("== %s ERR %s" % (u, e)); continue
-            keep = 7000 if re.search(r"dhcp|client|station|mac|parent|wlan", u, re.I) else 1200
+            keep = 7000 if re.search(r"dhcp|client|station|mac|parent|wlan", u, re.I) else 1500
             out.append("== %s len=%d macs=%d\n%s" % (u, len(h), len(MAC.findall(h)), h[:keep]))
-            for q in re.findall(r"(?:cgi-bin/)?webproc\?[^'\"\s<>]+", h):
-                q = "/cgi-bin/" + q.split("webproc?", 1)[0].split("cgi-bin/")[-1] + "webproc?" + q.split("webproc?", 1)[1]
-                q = q.replace("&amp;", "&")
+            for q in re.findall(r"webproc\?[^'\"\s<>]+", h):
+                q = "/cgi-bin/" + q.replace("&amp;", "&")
                 if not bad.search(q): todo.append(q)
+            for j in re.findall(r"src=\"(/html/js/[^\"]+\.js)\"", h):
+                if j not in seen and js < 8 and "boot" not in j:
+                    js += 1; seen.add(j)
+                    try: out.append("== %s\n%s" % (j, s.get(j)[:2500]))
+                    except Exception as e: out.append("== %s ERR %s" % (j, e))
         return "\n\n".join(out).replace(s.c["pass"], "XXXX")
 
 
