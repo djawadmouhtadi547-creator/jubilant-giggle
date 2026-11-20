@@ -33,18 +33,40 @@ def rows(html):
 
 
 class Router:
-    def __init__(s, c): s.c = c
+    def __init__(s, c):
+        s.c, s.ck = c, {}
 
-    def get(s, path, params=None):
+    def cookie(s):
+        d = {"language": "en_us", "TBSPASSWORD": s.c["pass"], "sys_UserName": s.c["user"], **s.ck}
+        return "; ".join("%s=%s" % kv for kv in d.items())
+
+    def get(s, path, params=None, data=None):
         url = "http://%s%s" % (s.c["host"], path)
-        if params: url += "?" + urllib.parse.urlencode(params)
-        r = urllib.request.Request(url)
-        r.add_header("Authorization", "Basic " + base64.b64encode(("%s:%s" % (s.c["user"], s.c["pass"])).encode()).decode())
+        if params: url += "?" + urllib.parse.urlencode(params, safe=":/*")
+        r = urllib.request.Request(url, data=data)
+        r.add_header("Cookie", s.cookie())
         r.add_header("Referer", "http://%s/" % s.c["host"])
-        with urllib.request.urlopen(r, timeout=6) as f:
+        with urllib.request.urlopen(r, timeout=8) as f:
+            for h in f.headers.get_all("Set-Cookie") or []:
+                m = re.match(r"(\w+)=([^;]*)", h)
+                if m: s.ck[m.group(1)] = m.group(2)
             return f.read().decode("utf-8", "ignore")
 
+    def login(s):
+        body = urllib.parse.urlencode({"getpage": "html/index.html", "errorpage": "html/main.html",
+                                       "var:language": "en_us", "var:page": "*",
+                                       "login:command/username": s.c["user"],
+                                       "login:command/password": s.c["pass"]}, safe=":/*").encode()
+        s.get("/cgi-bin/webproc", data=body)
+        return "sessionid" in s.ck
+
+    def page(s, menu, page, sub=""):
+        p = {"getpage": "html/index.html", "var:menu": menu, "var:page": page}
+        if sub: p["var:subpage"] = sub
+        return s.get("/cgi-bin/webproc", p)
+
     def clients(s):
+        if "sessionid" not in s.ck: s.login()
         wifi, dh = set(), {}
         try: wifi = {norm(m) for m in MAC.findall(s.get(s.c["p_wifi"]))}
         except Exception: pass
@@ -80,20 +102,27 @@ class Router:
         return mac not in s.get(s.c["p_tod"]).lower()
 
     def diag(s):
-        todo = ["/"] + [s.c[k] for k in ("p_dhcp", "p_wifi", "p_tod")]
-        seen, out = set(), []
-        while todo and len(seen) < 40:
-            p = todo.pop(0)
-            if p in seen: continue
-            seen.add(p)
-            try: h = s.get(p)
+        out = ["login ok: %s  cookies: %s" % (s.login(), list(s.ck))]
+        bad = re.compile(r"logout|reboot|reset|restore|upgrade|factory|obj-action|delete|remove", re.I)
+        todo = ["/cgi-bin/webproc?getpage=html/index.html&var:menu=%s&var:page=%s" % (m, p) for m, p in
+                (("status", ""), ("advanced", "parent_control"), ("advanced", "block_macaddress"),
+                 ("setup", ""), ("management", ""))]
+        todo += ["/cgi-bin/webproc?getpage=html/index.html&var:menu=advanced&var:page=parent_control&var:subpage=block_macaddress"]
+        seen = set()
+        while todo and len(seen) < 45:
+            u = todo.pop(0)
+            if u in seen: continue
+            seen.add(u)
+            try: h = s.get(u)
             except Exception as e:
-                out.append("== %s ERR %s" % (p, e)); continue
-            out.append("== %s len=%d macs=%d sessionKey=%s forms=%s\n%s" % (
-                p, len(h), len(MAC.findall(h)), "sessionKey" in h, re.findall(r"<form[^>]*>", h, re.I)[:3], h[:800]))
-            for l in re.findall(r"['\"=(]\s*/?([\w\-./]+\.(?:html|htm|cmd|tmp|asp|cgi|xml))", h):
-                todo.append("/" + l)
-        return "\n\n".join(out)
+                out.append("== %s ERR %s" % (u, e)); continue
+            keep = 7000 if re.search(r"dhcp|client|station|mac|parent|wlan", u, re.I) else 1200
+            out.append("== %s len=%d macs=%d\n%s" % (u, len(h), len(MAC.findall(h)), h[:keep]))
+            for q in re.findall(r"(?:cgi-bin/)?webproc\?[^'\"\s<>]+", h):
+                q = "/cgi-bin/" + q.split("webproc?", 1)[0].split("cgi-bin/")[-1] + "webproc?" + q.split("webproc?", 1)[1]
+                q = q.replace("&amp;", "&")
+                if not bad.search(q): todo.append(q)
+        return "\n\n".join(out).replace(s.c["pass"], "XXXX")
 
 
 class App:
